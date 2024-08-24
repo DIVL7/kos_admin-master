@@ -1,40 +1,82 @@
-// Importing necessary Next.js types and the cors middleware
-import type { NextApiRequest, NextApiResponse } from 'next';
-import Cors from 'cors';
+import Customer from "@/lib/models/Customer";
+import Order from "@/lib/models/Order";
+import { connectToDB } from "@/lib/mongoDB";
+import { NextRequest, NextResponse } from "next/server";
+import { stripe } from "@/lib/stripe";
 
-// Initialize CORS middleware with your specific configuration
-const cors = Cors({
-    origin: 'https://kos-store-master-q1n2wbfyh-luis-diazs-projects-53ef6375.vercel.app', // Change this to match the URL of your frontend app
-    methods: ['POST', 'OPTIONS'], // List of allowed methods
-    credentials: true, // This option allows cookies to be sent and is essential for sessions to work properly if you use them
-    allowedHeaders: ['Content-Type', 'Authorization'], // Specify headers that are allowed
-});
+export const POST = async (req: NextRequest) => {
+  try {
+    const rawBody = await req.text()
+    const signature = req.headers.get("Stripe-Signature") as string
 
-// Helper function to run middleware
-function runMiddleware(req: NextApiRequest, res: NextApiResponse, fn: any) {
-    return new Promise((resolve, reject) => {
-        fn(req, res, (result: any) => {
-            if (result instanceof Error) {
-                return reject(result);
-            }
-            return resolve(result);
-        });
-    });
-}
+    const event = stripe.webhooks.constructEvent(
+      rawBody,
+      signature,
+      process.env.STRIPE_WEBHOOK_SECRET!
+    )
 
-// Default export of the API route using an asynchronous function
-export default async function handler(req: NextApiRequest, res: NextApiResponse) {
-    // First, run CORS middleware
-    await runMiddleware(req, res, cors);
+    if (event.type === "checkout.session.completed") {
+      const session = event.data.object
 
-    // Check the HTTP method
-    if (req.method === 'POST') {
-        // Handle POST request logic here
-        // For example, process webhook data
-        res.status(200).json({ message: 'Webhook received and processed successfully!' });
-    } else {
-        // If any method other than POST is used, return a 405 Method Not Allowed
-        res.setHeader('Allow', ['POST']);
-        res.status(405).end(`Method ${req.method} Not Allowed`);
+      const customerInfo = {
+        clerkId: session?.client_reference_id,
+        name: session?.customer_details?.name,
+        email: session?.customer_details?.email,
+      }
+
+      const shippingAddress = {
+        street: session?.shipping_details?.address?.line1,
+        city: session?.shipping_details?.address?.city,
+        state: session?.shipping_details?.address?.state,
+        postalCode: session?.shipping_details?.address?.postal_code,
+        country: session?.shipping_details?.address?.country,
+      }
+
+      const retrieveSession = await stripe.checkout.sessions.retrieve(
+        session.id,
+        { expand: ["line_items.data.price.product"]}
+      )
+
+      const lineItems = await retrieveSession?.line_items?.data
+
+      const orderItems = lineItems?.map((item: any) => {
+        return {
+          product: item.price.product.metadata.productId,
+          color: item.price.product.metadata.color || "N/A",
+          size: item.price.product.metadata.size || "N/A",
+          quantity: item.quantity,
+        }
+      })
+
+      await connectToDB()
+
+      const newOrder = new Order({
+        customerClerkId: customerInfo.clerkId,
+        products: orderItems,
+        shippingAddress,
+        shippingRate: session?.shipping_cost?.shipping_rate,
+        totalAmount: session.amount_total ? session.amount_total / 100 : 0,
+      })
+
+      await newOrder.save()
+
+      let customer = await Customer.findOne({ clerkId: customerInfo.clerkId })
+
+      if (customer) {
+        customer.orders.push(newOrder._id)
+      } else {
+        customer = new Customer({
+          ...customerInfo,
+          orders: [newOrder._id],
+        })
+      }
+
+      await customer.save()
     }
+
+    return new NextResponse("Order created", { status: 200 })
+  } catch (err) {
+    console.log("[webhooks_POST]", err)
+    return new NextResponse("Failed to create the order", { status: 500 })
+  }
 }
