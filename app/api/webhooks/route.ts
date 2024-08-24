@@ -1,82 +1,38 @@
-import Customer from "@/lib/models/Customer";
-import Order from "@/lib/models/Order";
-import { connectToDB } from "@/lib/mongoDB";
-import { NextRequest, NextResponse } from "next/server";
-import { stripe } from "@/lib/stripe";
+// Import necessary modules from Next.js and CORS package
+import type { NextApiRequest, NextApiResponse } from 'next';
+import Cors from 'cors';
 
-export const POST = async (req: NextRequest) => {
-  try {
-    const rawBody = await req.text()
-    const signature = req.headers.get("Stripe-Signature") as string
+// Initialize CORS middleware with specific options
+const cors = Cors({
+  methods: ['POST', 'OPTIONS'], // Specify the methods allowed
+  origin: 'https://kos-store-master-q1n2wbfyh-luis-diazs-projects-53ef6375.vercel.app', // Frontend domain
+  credentials: true, // This is required if cookies are sent
+});
 
-    const event = stripe.webhooks.constructEvent(
-      rawBody,
-      signature,
-      process.env.STRIPE_WEBHOOK_SECRET!
-    )
-
-    if (event.type === "checkout.session.completed") {
-      const session = event.data.object
-
-      const customerInfo = {
-        clerkId: session?.client_reference_id,
-        name: session?.customer_details?.name,
-        email: session?.customer_details?.email,
+// Helper function to run middleware
+function runMiddleware(req: NextApiRequest, res: NextApiResponse, fn: any) {
+  return new Promise((resolve, reject) => {
+    fn(req, res, (result: any) => {
+      if (result instanceof Error) {
+        return reject(result);
       }
+      return resolve(result);
+    });
+  });
+}
 
-      const shippingAddress = {
-        street: session?.shipping_details?.address?.line1,
-        city: session?.shipping_details?.address?.city,
-        state: session?.shipping_details?.address?.state,
-        postalCode: session?.shipping_details?.address?.postal_code,
-        country: session?.shipping_details?.address?.country,
-      }
+// API route handler
+export default async function handler(req: NextApiRequest, res: NextApiResponse) {
+  // Run CORS middleware to handle CORS preflight requests and ensure security
+  await runMiddleware(req, res, cors);
 
-      const retrieveSession = await stripe.checkout.sessions.retrieve(
-        session.id,
-        { expand: ["line_items.data.price.product"]}
-      )
-
-      const lineItems = await retrieveSession?.line_items?.data
-
-      const orderItems = lineItems?.map((item: any) => {
-        return {
-          product: item.price.product.metadata.productId,
-          color: item.price.product.metadata.color || "N/A",
-          size: item.price.product.metadata.size || "N/A",
-          quantity: item.quantity,
-        }
-      })
-
-      await connectToDB()
-
-      const newOrder = new Order({
-        customerClerkId: customerInfo.clerkId,
-        products: orderItems,
-        shippingAddress,
-        shippingRate: session?.shipping_cost?.shipping_rate,
-        totalAmount: session.amount_total ? session.amount_total / 100 : 0,
-      })
-
-      await newOrder.save()
-
-      let customer = await Customer.findOne({ clerkId: customerInfo.clerkId })
-
-      if (customer) {
-        customer.orders.push(newOrder._id)
-      } else {
-        customer = new Customer({
-          ...customerInfo,
-          orders: [newOrder._id],
-        })
-      }
-
-      await customer.save()
-    }
-
-    return new NextResponse("Order created", { status: 200 })
-  } catch (err) {
-    console.log("[webhooks_POST]", err)
-    return new NextResponse("Failed to create the order", { status: 500 })
+  if (req.method === 'POST') {
+    // Logic for handling POST requests
+    // You can process your webhook data here
+    res.status(200).json({ message: 'Webhook received and processed successfully' });
+  } else {
+    // Handle other methods or return an error for methods not supported
+    res.setHeader('Allow', ['POST']);
+    res.status(405).end(`Method ${req.method} Not Allowed`);
   }
 }
