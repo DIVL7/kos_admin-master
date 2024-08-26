@@ -1,36 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { stripe } from "@/lib/stripe";
 
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization",
-};
-
-export async function OPTIONS() {
-  return NextResponse.json({}, { headers: corsHeaders });
-}
-
-export async function POST(req: NextRequest) {
+export const POST = async (req: NextRequest) => {
   try {
     const { cartItems, customer } = await req.json();
 
-    if (!cartItems || !customer) {
-      return new NextResponse("Not enough data to checkout", { status: 400 });
-    }
-
-    const session = await stripe.checkout.sessions.create({
-      payment_method_types: ["card"],
-      mode: "payment",
-      shipping_address_collection: {
-        allowed_countries: ["MX"],
-      },
-      shipping_options: [
-        { shipping_rate: "shr_1PpdQZGMiocaZwaVvEPD0RPx" },
-      ],
-      line_items: cartItems.map((cartItem: any) => ({
+    const lineItems = cartItems.map((cartItem: any) => {
+      return {
         price_data: {
-          currency: "mxn",
+          currency: "usd", // Change to your preferred currency
           product_data: {
             name: cartItem.item.title,
             metadata: {
@@ -40,17 +18,38 @@ export async function POST(req: NextRequest) {
             },
           },
           unit_amount: cartItem.item.price * 100,
+          recurring: cartItem.item.recurring ? { interval: "month" } : undefined, // Handle subscriptions
         },
         quantity: cartItem.quantity,
-      })),
-      client_reference_id: customer.clerkId,
+      };
+    });
+
+    const session = await stripe.checkout.sessions.create({
+      payment_method_types: ["card"],
+      mode: "subscription", // Handle mixed carts
+      line_items: lineItems,
+      customer_email: customer.email,
       success_url: `${process.env.ECOMMERCE_STORE_URL}/payment_success`,
       cancel_url: `${process.env.ECOMMERCE_STORE_URL}/cart`,
     });
 
-    return NextResponse.json(session, { headers: corsHeaders });
+    return NextResponse.json({ url: session.url }, {
+      status: 200,
+      headers: {
+        "Access-Control-Allow-Origin": "https://kos-store-master.vercel.app",
+        "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization",
+      },
+    });
   } catch (err) {
-    console.log("[checkout_POST]", err);
-    return new NextResponse("Internal Server Error", { status: 500 });
+    console.error("[/api/checkout] Error occurred:", err);
+    return new NextResponse("Failed to create the order", {
+      status: 500,
+      headers: {
+        "Access-Control-Allow-Origin": "https://kos-store-master.vercel.app",
+        "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization",
+      },
+    });
   }
-}
+};
